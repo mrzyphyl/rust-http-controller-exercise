@@ -25,9 +25,10 @@ You will not use a database server like PostgreSQL or MySQL. Instead, you will u
 13. [Step 10 — Admin Endpoints](#step-10--admin-endpoints)
 14. [Step 11 — Error Handling](#step-11--error-handling)
 15. [Step 12 — Wiring It All Together in main.rs](#step-12--wiring-it-all-together-in-mainrs)
-16. [Best Practices Checklist](#best-practices-checklist)
-17. [How to Test Your Endpoints](#how-to-test-your-endpoints)
-18. [Glossary](#glossary)
+16. [Step 13 — Unit Tests](#step-13--unit-tests)
+17. [Best Practices Checklist](#best-practices-checklist)
+18. [How to Test Your Endpoints](#how-to-test-your-endpoints)
+19. [Glossary](#glossary)
 
 ---
 
@@ -813,6 +814,616 @@ This means you can control log verbosity with the `RUST_LOG` environment variabl
 RUST_LOG=debug cargo run    # shows everything
 RUST_LOG=info cargo run     # shows info and above
 ```
+
+---
+
+## Step 13 — Unit Tests
+
+### Why Write Unit Tests?
+
+Unit tests verify that individual pieces of your code work correctly **in isolation**, without running a real HTTP server or a real database. They run fast (milliseconds), give precise error messages when something breaks, and act as living documentation — a test named `test_user_role_does_not_have_admin_permissions` tells the next developer exactly what the code is supposed to do.
+
+In Rust, unit tests live in the **same file** as the code they test, inside a `#[cfg(test)]` module. The `#[cfg(test)]` attribute tells the compiler to only include this code when running `cargo test` — it is stripped out of your release binary entirely.
+
+```rust
+// At the bottom of any .rs file:
+#[cfg(test)]
+mod tests {
+    use super::*;  // import everything from the parent module
+
+    #[test]
+    fn it_works() {
+        assert_eq!(2 + 2, 4);
+    }
+}
+```
+
+### How to Run Tests
+
+```bash
+cargo test                         # run all tests
+cargo test test_permissions        # run tests whose name contains "test_permissions"
+cargo test -- --nocapture          # show println! output during tests
+```
+
+### What to Test and What Not to Test
+
+**Test:**
+- Pure logic: permission mappings, role conversions, input validation rules
+- Password hashing and verification
+- JWT creation and validation
+- Error type conversions
+- Edge cases: expired tokens, already-used reset tokens, empty inputs
+
+**Do not unit test:**
+- HTTP routing (use integration tests for that)
+- Database queries in isolation (they need a real connection — use a test helper that sets up an in-memory DB)
+- Axum extractors directly (they require a full request context)
+
+For database-touching code, use a **test helper function** that creates a fresh in-memory SQLite database with the schema applied. Each test gets its own clean database, so tests do not interfere with each other.
+
+---
+
+### Tests for `src/permissions.rs`
+
+These tests verify your RBAC logic. They are pure logic with no I/O — fast and simple.
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Role enum conversion ---
+
+    #[test]
+    fn test_role_from_string_user() {
+        let role = Role::from("user".to_string());
+        assert_eq!(role, Role::User);
+    }
+
+    #[test]
+    fn test_role_from_string_admin() {
+        let role = Role::from("admin".to_string());
+        assert_eq!(role, Role::Admin);
+    }
+
+    #[test]
+    fn test_role_to_string_user() {
+        let s = String::from(Role::User);
+        assert_eq!(s, "user");
+    }
+
+    #[test]
+    fn test_role_to_string_admin() {
+        let s = String::from(Role::Admin);
+        assert_eq!(s, "admin");
+    }
+
+    // --- User role permissions ---
+
+    #[test]
+    fn test_user_role_has_read_own_profile() {
+        assert!(has_permission(&Role::User, &Permission::ReadOwnProfile));
+    }
+
+    #[test]
+    fn test_user_role_has_update_own_profile() {
+        assert!(has_permission(&Role::User, &Permission::UpdateOwnProfile));
+    }
+
+    #[test]
+    fn test_user_role_cannot_read_all_users() {
+        assert!(!has_permission(&Role::User, &Permission::ReadAllUsers));
+    }
+
+    #[test]
+    fn test_user_role_cannot_delete_any_user() {
+        assert!(!has_permission(&Role::User, &Permission::DeleteAnyUser));
+    }
+
+    #[test]
+    fn test_user_role_cannot_update_any_user() {
+        assert!(!has_permission(&Role::User, &Permission::UpdateAnyUser));
+    }
+
+    #[test]
+    fn test_user_role_cannot_reset_any_password() {
+        assert!(!has_permission(&Role::User, &Permission::ResetAnyUserPassword));
+    }
+
+    // --- Admin role permissions ---
+
+    #[test]
+    fn test_admin_role_has_all_permissions() {
+        let all_permissions = vec![
+            Permission::ReadOwnProfile,
+            Permission::UpdateOwnProfile,
+            Permission::ReadAllUsers,
+            Permission::UpdateAnyUser,
+            Permission::DeleteAnyUser,
+            Permission::ResetAnyUserPassword,
+        ];
+        for permission in &all_permissions {
+            assert!(
+                has_permission(&Role::Admin, permission),
+                "Admin should have permission {:?}",
+                permission
+            );
+        }
+    }
+
+    #[test]
+    fn test_user_permissions_are_subset_of_admin() {
+        // Everything a User can do, an Admin can also do
+        let user_permissions = permissions_for_role(&Role::User);
+        for permission in &user_permissions {
+            assert!(
+                has_permission(&Role::Admin, permission),
+                "Admin should have User permission {:?}",
+                permission
+            );
+        }
+    }
+}
+```
+
+**What these tests cover:**
+- `Role` round-trips correctly through string conversion
+- Each role has exactly the permissions it should have
+- The subset relationship between User and Admin permissions is maintained
+- The `assert!(..., "message")` pattern gives a clear failure message if a test fails
+
+---
+
+### Tests for `src/auth/password.rs`
+
+Password tests verify that hashing is non-deterministic (two hashes of the same password differ) and that verification works correctly.
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hash_password_returns_ok() {
+        let result = hash_password("my_secure_password");
+        assert!(result.is_ok(), "hash_password should not return an error");
+    }
+
+    #[test]
+    fn test_hashed_password_is_not_plain_text() {
+        let password = "my_secure_password";
+        let hash = hash_password(password).unwrap();
+        // The hash must never equal the original password
+        assert_ne!(hash, password);
+    }
+
+    #[test]
+    fn test_same_password_produces_different_hashes() {
+        // Argon2 includes a random salt — identical inputs produce different outputs
+        let password = "my_secure_password";
+        let hash1 = hash_password(password).unwrap();
+        let hash2 = hash_password(password).unwrap();
+        assert_ne!(
+            hash1, hash2,
+            "Two hashes of the same password must differ (different salts)"
+        );
+    }
+
+    #[test]
+    fn test_verify_correct_password_returns_true() {
+        let password = "my_secure_password";
+        let hash = hash_password(password).unwrap();
+        let result = verify_password(password, &hash).unwrap();
+        assert!(result, "Correct password must verify as true");
+    }
+
+    #[test]
+    fn test_verify_wrong_password_returns_false() {
+        let hash = hash_password("correct_password").unwrap();
+        let result = verify_password("wrong_password", &hash).unwrap();
+        assert!(!result, "Wrong password must verify as false");
+    }
+
+    #[test]
+    fn test_verify_empty_password_returns_false() {
+        let hash = hash_password("correct_password").unwrap();
+        let result = verify_password("", &hash).unwrap();
+        assert!(!result, "Empty password must not match a non-empty password hash");
+    }
+
+    #[test]
+    fn test_hash_empty_password_is_still_a_hash() {
+        // Even empty passwords should be hashable — the caller decides
+        // whether to reject them at the validation layer, not the hashing layer
+        let result = hash_password("");
+        assert!(result.is_ok(), "hash_password with empty string should not panic");
+    }
+}
+```
+
+**Key concepts demonstrated:**
+- `is_ok()` / `is_err()` — check `Result` variants without unwrapping
+- `unwrap()` is acceptable in tests — if it panics, the test fails with a clear message
+- Testing the negative case (wrong password, empty password) is as important as the happy path
+- The "different hashes for same password" test verifies that salting is working
+
+---
+
+### Tests for `src/auth/token.rs`
+
+Token tests verify that JWTs can be created and validated, and that invalid tokens are rejected.
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_SECRET: &str = "test_secret_key_that_is_long_enough_for_hs256";
+
+    #[test]
+    fn test_create_token_returns_a_string() {
+        let result = create_token("user-uuid-123", "user", TEST_SECRET);
+        assert!(result.is_ok());
+        let token = result.unwrap();
+        assert!(!token.is_empty());
+    }
+
+    #[test]
+    fn test_token_has_three_parts_separated_by_dots() {
+        // All JWTs have the format: header.payload.signature
+        let token = create_token("user-uuid-123", "user", TEST_SECRET).unwrap();
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT must have exactly 3 dot-separated parts");
+    }
+
+    #[test]
+    fn test_validate_valid_token_returns_claims() {
+        let token = create_token("user-uuid-123", "admin", TEST_SECRET).unwrap();
+        let result = validate_token(&token, TEST_SECRET);
+        assert!(result.is_ok(), "A freshly created token must be valid");
+    }
+
+    #[test]
+    fn test_validate_token_has_correct_user_id() {
+        let user_id = "user-uuid-abc";
+        let token = create_token(user_id, "user", TEST_SECRET).unwrap();
+        let claims = validate_token(&token, TEST_SECRET).unwrap();
+        assert_eq!(claims.sub, user_id);
+    }
+
+    #[test]
+    fn test_validate_token_has_correct_role() {
+        let token = create_token("some-id", "admin", TEST_SECRET).unwrap();
+        let claims = validate_token(&token, TEST_SECRET).unwrap();
+        assert_eq!(claims.role, "admin");
+    }
+
+    #[test]
+    fn test_validate_token_with_wrong_secret_fails() {
+        let token = create_token("user-uuid-123", "user", TEST_SECRET).unwrap();
+        let result = validate_token(&token, "a_completely_different_secret");
+        assert!(
+            result.is_err(),
+            "A token signed with a different secret must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_garbage_string_fails() {
+        let result = validate_token("this.is.not.a.jwt", TEST_SECRET);
+        assert!(result.is_err(), "A garbage string must not validate as a JWT");
+    }
+
+    #[test]
+    fn test_validate_empty_string_fails() {
+        let result = validate_token("", TEST_SECRET);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_tampered_token_fails() {
+        let token = create_token("user-uuid-123", "user", TEST_SECRET).unwrap();
+        // Flip the last character of the signature to simulate tampering
+        let mut tampered = token.clone();
+        let last = tampered.pop().unwrap();
+        let replacement = if last == 'a' { 'b' } else { 'a' };
+        tampered.push(replacement);
+
+        let result = validate_token(&tampered, TEST_SECRET);
+        assert!(
+            result.is_err(),
+            "A tampered token signature must be rejected"
+        );
+    }
+}
+```
+
+**Key concepts demonstrated:**
+- Using a `const TEST_SECRET` so all token tests use a consistent, known secret
+- Testing the JWT structure directly (3 dot-separated parts) as a sanity check
+- Testing that changing the secret invalidates the token — proves the signing works
+- Testing tampered tokens — proves the signature verification is working, not just parsing
+- Negative tests (wrong secret, garbage input, empty string) are critical for security code
+
+---
+
+### Tests for `src/error.rs`
+
+Test that your `AppError` variants produce the correct HTTP status codes.
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    fn status_of(err: AppError) -> StatusCode {
+        err.into_response().status()
+    }
+
+    #[test]
+    fn test_unauthorized_maps_to_401() {
+        assert_eq!(status_of(AppError::Unauthorized), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_forbidden_maps_to_403() {
+        assert_eq!(status_of(AppError::Forbidden), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn test_not_found_maps_to_404() {
+        assert_eq!(status_of(AppError::NotFound), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_conflict_maps_to_409() {
+        assert_eq!(
+            status_of(AppError::Conflict("username taken".to_string())),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn test_bad_request_maps_to_400() {
+        assert_eq!(
+            status_of(AppError::BadRequest("invalid input".to_string())),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn test_internal_maps_to_500() {
+        assert_eq!(
+            status_of(AppError::Internal("something broke".to_string())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn test_database_error_maps_to_500() {
+        // rusqlite::Error can be constructed from its ffi code
+        // Use Internal as a proxy since Database wraps rusqlite::Error
+        // which is harder to construct in tests — use Internal instead
+        assert_eq!(
+            status_of(AppError::Internal("db error".to_string())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+}
+```
+
+**Why test error mappings?** If you ever refactor `AppError::into_response` and accidentally swap two status codes, these tests catch it immediately. Status codes matter — returning 403 where you meant 401 will confuse every client consuming your API.
+
+---
+
+### Tests for `src/db.rs`
+
+Database tests use a fresh in-memory database per test. Define a test helper:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper: creates a fresh in-memory DB with schema and seed data applied
+    fn test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();   // your function that runs CREATE TABLE statements
+        seed_data(&conn).unwrap();      // your function that inserts sample users
+        conn
+    }
+
+    #[test]
+    fn test_schema_creates_users_table() {
+        let conn = test_db();
+        // Query sqlite_master to confirm the table exists
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='users'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "users table must exist after schema creation");
+    }
+
+    #[test]
+    fn test_schema_creates_password_reset_tokens_table() {
+        let conn = test_db();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='password_reset_tokens'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_seed_inserts_at_least_one_admin() {
+        let conn = test_db();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE role = 'admin'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(count >= 1, "Seed data must include at least one admin user");
+    }
+
+    #[test]
+    fn test_seed_inserts_at_least_two_regular_users() {
+        let conn = test_db();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE role = 'user'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(count >= 2, "Seed data must include at least two regular users");
+    }
+
+    #[test]
+    fn test_seeded_passwords_are_not_plain_text() {
+        let conn = test_db();
+        // Argon2 hashes always start with "$argon2"
+        // bcrypt hashes always start with "$2b$"
+        // Neither looks like a plain English password
+        let hashes: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT password_hash FROM users")
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        for hash in &hashes {
+            assert!(
+                hash.starts_with("$argon2") || hash.starts_with("$2b$"),
+                "password_hash '{}' does not look like a valid hash — was it stored as plain text?",
+                hash
+            );
+        }
+    }
+
+    #[test]
+    fn test_user_ids_are_unique() {
+        let conn = test_db();
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+            .unwrap();
+        let unique: i64 = conn
+            .query_row("SELECT COUNT(DISTINCT id) FROM users", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, unique, "All user IDs must be unique");
+    }
+}
+```
+
+**Key concepts demonstrated:**
+- The `test_db()` helper is the most important pattern in database testing — isolated state per test
+- Testing schema existence separately from data existence (if schema fails, you know why)
+- Asserting the hash format as a proxy for "password was hashed" — a lightweight but effective check
+- Uniqueness assertions catch bugs where UUID generation might accidentally repeat
+
+---
+
+### Tests for `src/models.rs`
+
+Test that your model conversions work correctly, particularly `User` → `UserResponse`.
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_user() -> User {
+        User {
+            id: "test-uuid".to_string(),
+            username: "alice".to_string(),
+            email: "alice@example.com".to_string(),
+            password_hash: "$argon2id$v=19$very_secret_hash".to_string(),
+            role: Role::User,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_user_response_does_not_contain_password_hash() {
+        let user = sample_user();
+        let response = UserResponse::from(user); // implement From<User> for UserResponse
+        // Serialize to JSON and confirm the hash is absent
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(
+            !json.contains("password_hash"),
+            "UserResponse JSON must not contain the field 'password_hash'"
+        );
+        assert!(
+            !json.contains("$argon2"),
+            "UserResponse JSON must not contain the hash value"
+        );
+    }
+
+    #[test]
+    fn test_user_response_preserves_id() {
+        let user = sample_user();
+        let response = UserResponse::from(user);
+        assert_eq!(response.id, "test-uuid");
+    }
+
+    #[test]
+    fn test_user_response_preserves_username() {
+        let user = sample_user();
+        let response = UserResponse::from(user);
+        assert_eq!(response.username, "alice");
+    }
+
+    #[test]
+    fn test_user_response_preserves_email() {
+        let user = sample_user();
+        let response = UserResponse::from(user);
+        assert_eq!(response.email, "alice@example.com");
+    }
+}
+```
+
+**Why test `UserResponse`?** Because the `password_hash` leak is a catastrophic security bug. A test that explicitly checks the serialized JSON for the hash is a permanent safety net. Even if someone refactors `UserResponse` and accidentally adds the hash back, this test will catch it.
+
+---
+
+### Understanding Test Output
+
+When you run `cargo test`, you will see output like:
+
+```
+running 32 tests
+test permissions::tests::test_user_role_has_read_own_profile ... ok
+test permissions::tests::test_user_role_cannot_delete_any_user ... ok
+test auth::password::tests::test_same_password_produces_different_hashes ... ok
+...
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+If a test fails, you see the file and line number, the assertion that failed, and the actual vs expected values. This is much more useful than a runtime crash in production.
+
+### A Note on Test-Driven Development (TDD)
+
+Some developers write tests **before** the implementation. The workflow is:
+
+1. Write a test that describes the behaviour you want
+2. Run `cargo test` — it fails (the code does not exist yet)
+3. Write the minimum code to make the test pass
+4. Refactor — clean up the code while keeping the tests green
+
+This is called **Red → Green → Refactor**. You do not have to follow TDD strictly, but writing the test first forces you to think about the API of your code before you write it. Many experienced developers find it leads to better-designed code.
 
 ---
 

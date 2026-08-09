@@ -1,6 +1,6 @@
 # rust-http-controllers
 
-A skill-building project for learning how to build a REST API in Rust from scratch. Covers authentication, authorization, middleware, password security, and SQLite database access using best practices.
+A skill-building project for learning how to build a REST API in Rust from scratch. Covers authentication, authorization, middleware, password security, SQLite database access, and unit testing using best practices.
 
 ## What This Project Builds
 
@@ -13,6 +13,7 @@ A fully functional HTTP API with:
 - Argon2 password hashing
 - Axum extractor-based middleware for auth enforcement
 - In-memory SQLite database with seed data (no server setup required)
+- Unit tests for permissions, password hashing, JWT tokens, error mapping, DB schema, and models
 
 ## Prerequisites
 
@@ -35,6 +36,16 @@ Set the log level with the `RUST_LOG` environment variable:
 RUST_LOG=debug cargo run   # verbose
 RUST_LOG=info cargo run    # standard
 ```
+
+## Running Tests
+
+```bash
+cargo test                      # run all tests
+cargo test test_permissions     # run tests whose name contains "test_permissions"
+cargo test -- --nocapture       # show log output during tests
+```
+
+Tests are co-located with the code they test inside `#[cfg(test)]` modules. No external services are required — database tests use an in-memory SQLite instance spun up per test.
 
 ## Endpoints
 
@@ -88,7 +99,7 @@ src/
 
 ## Guide
 
-See [GUIDE.md](./GUIDE.md) for a detailed, step-by-step walkthrough of the entire implementation — including the rationale behind every design decision, aimed at junior developers.
+See [GUIDE.md](./GUIDE.md) for a detailed, step-by-step walkthrough of the entire implementation — including the rationale behind every design decision, unit test examples for each module, and a best practices checklist. Aimed at junior developers.
 
 ## License
 
