@@ -15,15 +15,15 @@ You will not use a database server like PostgreSQL or MySQL. Instead, you will u
 3. [Dependency Choices and Why](#3-dependency-choices-and-why)
 4. [Step 1 — Project Structure](#step-1--project-structure)
 5. [Step 2 — Cargo.toml Dependencies](#step-2--cargotoml-dependencies)
-6. [Step 3 — The Database Layer (SQLite Seed)](#step-3--the-database-layer-sqlite-seed)
+6. [Step 3 — Error Handling](#step-3--error-handling)
 7. [Step 4 — The Permissions Enum and Roles](#step-4--the-permissions-enum-and-roles)
 8. [Step 5 — Models and Request/Response Types](#step-5--models-and-requestresponse-types)
 9. [Step 6 — Password Hashing](#step-6--password-hashing)
 10. [Step 7 — JWT and Authentication Tokens](#step-7--jwt-and-authentication-tokens)
-11. [Step 8 — Middleware](#step-8--middleware)
-12. [Step 9 — Auth Endpoints](#step-9--auth-endpoints)
-13. [Step 10 — Admin Endpoints](#step-10--admin-endpoints)
-14. [Step 11 — Error Handling](#step-11--error-handling)
+11. [Step 8 — The Database Layer (SQLite Seed)](#step-8--the-database-layer-sqlite-seed)
+12. [Step 9 — Middleware](#step-9--middleware)
+13. [Step 10 — Auth Endpoints](#step-10--auth-endpoints)
+14. [Step 11 — Admin Endpoints](#step-11--admin-endpoints)
 15. [Step 12 — Wiring It All Together in main.rs](#step-12--wiring-it-all-together-in-mainrs)
 16. [Step 13 — Unit Tests](#step-13--unit-tests)
 17. [Best Practices Checklist](#best-practices-checklist)
@@ -199,65 +199,66 @@ Run `cargo build` after editing this. Rust will fetch and compile all dependenci
 
 ---
 
-## Step 3 — The Database Layer (SQLite Seed)
+## Step 3 — Error Handling
 
-**File: `src/db.rs`**
+**File: `src/error.rs`**
 
-### What This File Does
+> **Why this comes first:** `AppError` is used by almost every other module — password hashing, JWT tokens, the database layer, middleware, and all handlers. Define it first so everything else can import and use it without circular dependencies.
 
-- Opens (or creates) an in-memory SQLite database using `rusqlite`
-- Creates the `users` and `password_reset_tokens` tables
-- Seeds the database with a few sample users so you do not have to register before you can test admin endpoints
+Every function in your application can fail in different ways: database errors, token validation errors, hashing errors, validation errors. If each returns a different error type, your handlers become messy with conversion code everywhere.
 
-### The Schema
+A single `AppError` enum unifies them:
 
-Think carefully about the schema before writing code. Here is what you need:
+```rust
+#[derive(thiserror::Error, Debug)]
+pub enum AppError {
+    #[error("Database error: {0}")]
+    Database(#[from] rusqlite::Error),
 
-**`users` table:**
+    #[error("Authentication failed")]
+    Unauthorized,
 
-| Column | Type | Notes |
-|---|---|---|
-| `id` | TEXT (UUID) | Primary key. UUID string. |
-| `username` | TEXT | Unique. The login name. |
-| `email` | TEXT | Unique. Used for password reset. |
-| `password_hash` | TEXT | Never the plain password. |
-| `role` | TEXT | `"user"` or `"admin"`. Stored as string, mapped to enum in Rust. |
-| `created_at` | TEXT | ISO 8601 datetime string. |
-| `updated_at` | TEXT | ISO 8601 datetime string. |
+    #[error("Forbidden")]
+    Forbidden,
 
-**`password_reset_tokens` table:**
+    #[error("Not found")]
+    NotFound,
 
-| Column | Type | Notes |
-|---|---|---|
-| `id` | TEXT (UUID) | Primary key. |
-| `user_id` | TEXT | Foreign key to `users.id`. |
-| `token` | TEXT | Random hex string. Single-use. |
-| `expires_at` | TEXT | ISO 8601. Token is invalid after this. |
-| `used` | INTEGER | 0 = unused, 1 = used. SQLite has no boolean. |
+    #[error("Conflict: {0}")]
+    Conflict(String),
 
-### Key Concept: In-Memory vs File-Based SQLite
+    #[error("Bad request: {0}")]
+    BadRequest(String),
 
-- **In-memory (`":memory:"`)**: The database lives in RAM. It is destroyed when the process exits. Perfect for this exercise — no cleanup needed, always starts fresh.
-- **File-based (`"./data.db"`)**: Persists to disk. You can inspect it with a SQLite browser tool.
+    #[error("Internal error: {0}")]
+    Internal(String),
+}
+```
 
-For this skill project, use in-memory. Pass the connection around using Axum's `State` extractor (explained in Step 12).
+### Converting `AppError` to HTTP Responses
 
-### Key Concept: Connection Sharing in Async Code
+Axum requires that errors returned from handlers implement `IntoResponse`. Implement it for `AppError`:
 
-`rusqlite::Connection` is **not** `Send` + `Sync` by default, meaning you cannot share it across async tasks safely on its own. You have two options:
+```rust
+impl IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, message) = match &self {
+            AppError::Unauthorized  => (StatusCode::UNAUTHORIZED,  self.to_string()),
+            AppError::Forbidden     => (StatusCode::FORBIDDEN,     self.to_string()),
+            AppError::NotFound      => (StatusCode::NOT_FOUND,     self.to_string()),
+            AppError::Conflict(m)   => (StatusCode::CONFLICT,      m.clone()),
+            AppError::BadRequest(m) => (StatusCode::BAD_REQUEST,   m.clone()),
+            AppError::Database(_)   => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()),
+            AppError::Internal(_)   => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()),
+        };
 
-1. Wrap it in `Arc<Mutex<Connection>>` — a reference-counted, mutually exclusive lock. Only one task accesses the DB at a time.
-2. Use `rusqlite`'s `r2d2` integration for a connection pool.
+        let body = serde_json::json!({ "error": message });
+        (status, Json(body)).into_response()
+    }
+}
+```
 
-For this exercise, **`Arc<Mutex<Connection>>`** is the right choice. It is simpler and sufficient for a single-user skill project. In production, you would use a proper async driver like `sqlx` with a connection pool.
-
-### Seed Data
-
-Create at least:
-- 1 admin user (role: `"admin"`)
-- 2 regular users (role: `"user"`)
-
-Hash the passwords when seeding. Do not seed plain text passwords — this reinforces the habit.
+Notice that `Database` and `Internal` both return a generic `"Internal server error"` to the client — you never expose internal error details. The real error is only visible in your logs (via `tracing`).
 
 ---
 
@@ -519,7 +520,71 @@ Why not JWTs? Because you need to be able to **invalidate** them after use. JWTs
 
 ---
 
-## Step 8 — Middleware
+## Step 8 — The Database Layer (SQLite Seed)
+
+**File: `src/db.rs`**
+
+> **Why this comes after password hashing:** The seed data function calls `hash_password()` from `src/auth/password.rs`. If you write `db.rs` first, you will not have a function to call yet.
+
+### What This File Does
+
+- Opens (or creates) an in-memory SQLite database using `rusqlite`
+- Creates the `users` and `password_reset_tokens` tables
+- Seeds the database with a few sample users so you do not have to register before you can test admin endpoints
+
+### The Schema
+
+Think carefully about the schema before writing code. Here is what you need:
+
+**`users` table:**
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT (UUID) | Primary key. UUID string. |
+| `username` | TEXT | Unique. The login name. |
+| `email` | TEXT | Unique. Used for password reset. |
+| `password_hash` | TEXT | Never the plain password. |
+| `role` | TEXT | `"user"` or `"admin"`. Stored as string, mapped to enum in Rust. |
+| `created_at` | TEXT | ISO 8601 datetime string. |
+| `updated_at` | TEXT | ISO 8601 datetime string. |
+
+**`password_reset_tokens` table:**
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT (UUID) | Primary key. |
+| `user_id` | TEXT | Foreign key to `users.id`. |
+| `token` | TEXT | Random hex string. Single-use. |
+| `expires_at` | TEXT | ISO 8601. Token is invalid after this. |
+| `used` | INTEGER | 0 = unused, 1 = used. SQLite has no boolean. |
+
+### Key Concept: In-Memory vs File-Based SQLite
+
+- **In-memory (`":memory:"`)**: The database lives in RAM. It is destroyed when the process exits. Perfect for this exercise — no cleanup needed, always starts fresh.
+- **File-based (`"./data.db"`)**: Persists to disk. You can inspect it with a SQLite browser tool.
+
+For this skill project, use in-memory. Pass the connection around using Axum's `State` extractor (explained in Step 12).
+
+### Key Concept: Connection Sharing in Async Code
+
+`rusqlite::Connection` is **not** `Send` + `Sync` by default, meaning you cannot share it across async tasks safely on its own. You have two options:
+
+1. Wrap it in `Arc<Mutex<Connection>>` — a reference-counted, mutually exclusive lock. Only one task accesses the DB at a time.
+2. Use `rusqlite`'s `r2d2` integration for a connection pool.
+
+For this exercise, **`Arc<Mutex<Connection>>`** is the right choice. It is simpler and sufficient for a single-user skill project. In production, you would use a proper async driver like `sqlx` with a connection pool.
+
+### Seed Data
+
+Create at least:
+- 1 admin user (role: `"admin"`)
+- 2 regular users (role: `"user"`)
+
+Hash the passwords when seeding. Do not seed plain text passwords — this reinforces the habit.
+
+---
+
+## Step 9 — Middleware
 
 **File: `src/middleware.rs`**
 
@@ -592,7 +657,7 @@ You cannot call this handler without an admin JWT. The compiler guarantees it.
 
 ---
 
-## Step 9 — Auth Endpoints
+## Step 10 — Auth Endpoints
 
 **File: `src/handlers/auth.rs`**
 
@@ -656,7 +721,7 @@ Steps:
 
 ---
 
-## Step 10 — Admin Endpoints
+## Step 11 — Admin Endpoints
 
 **File: `src/handlers/admin.rs`**
 
@@ -705,69 +770,6 @@ Steps:
 3. Return `204 No Content` — the standard HTTP response for a successful delete with no body
 
 **Guard:** Prevent admins from deleting themselves. Check if the `:id` matches the `AdminUser.user_id` from the extractor. If so, return `400 Bad Request` with message `"Cannot delete your own account"`.
-
----
-
-## Step 11 — Error Handling
-
-**File: `src/error.rs`**
-
-### Why a Unified Error Type?
-
-Every function in your application can fail in different ways: database errors, token validation errors, hashing errors, validation errors. If each returns a different error type, your handlers become messy with conversion code everywhere.
-
-A single `AppError` enum unifies them:
-
-```rust
-#[derive(thiserror::Error, Debug)]
-pub enum AppError {
-    #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
-
-    #[error("Authentication failed")]
-    Unauthorized,
-
-    #[error("Forbidden")]
-    Forbidden,
-
-    #[error("Not found")]
-    NotFound,
-
-    #[error("Conflict: {0}")]
-    Conflict(String),
-
-    #[error("Bad request: {0}")]
-    BadRequest(String),
-
-    #[error("Internal error: {0}")]
-    Internal(String),
-}
-```
-
-### Converting `AppError` to HTTP Responses
-
-Axum requires that errors returned from handlers implement `IntoResponse`. Implement it for `AppError`:
-
-```rust
-impl IntoResponse for AppError {
-    fn into_response(self) -> axum::response::Response {
-        let (status, message) = match &self {
-            AppError::Unauthorized  => (StatusCode::UNAUTHORIZED,  self.to_string()),
-            AppError::Forbidden     => (StatusCode::FORBIDDEN,     self.to_string()),
-            AppError::NotFound      => (StatusCode::NOT_FOUND,     self.to_string()),
-            AppError::Conflict(m)   => (StatusCode::CONFLICT,      m.clone()),
-            AppError::BadRequest(m) => (StatusCode::BAD_REQUEST,   m.clone()),
-            AppError::Database(_)   => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()),
-            AppError::Internal(_)   => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()),
-        };
-
-        let body = serde_json::json!({ "error": message });
-        (status, Json(body)).into_response()
-    }
-}
-```
-
-Notice that `Database` and `Internal` both return a generic `"Internal server error"` to the client — you never expose internal error details. The real error is only visible in your logs (via `tracing`).
 
 ---
 
