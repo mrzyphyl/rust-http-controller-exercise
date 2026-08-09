@@ -79,23 +79,32 @@ A **token** (JWT) is a short-lived credential the server issues after verifying 
 rust-http-controllers/
 ├── Cargo.toml
 ├── src/
-│   ├── main.rs              # Entry point — wires everything together
-│   ├── db.rs                # SQLite connection, schema creation, and seed data
-│   ├── models.rs            # Rust structs that map to DB rows and HTTP payloads
-│   ├── permissions.rs       # The Permission enum and Role enum
+│   ├── main.rs                        # Entry point — wires everything together
 │   ├── auth/
-│   │   ├── mod.rs           # Re-exports for the auth module
-│   │   ├── password.rs      # Password hashing and verification
-│   │   └── token.rs         # JWT creation and validation
-│   ├── middleware.rs        # Axum extractors that enforce auth and roles
+│   │   ├── mod.rs                     # Re-exports for the auth module
+│   │   ├── password.rs                # Password hashing and verification
+│   │   └── token.rs                   # JWT creation and validation
+│   ├── database/
+│   │   ├── db.rs                      # SQLite connection, schema creation, and seed data
+│   │   └── models/
+│   │       └── user.rs                # User row struct + Claims + all request payload structs
+│   ├── dto/
+│   │   └── responses/
+│   │       └── user-reponse.rs        # UserResponse — safe API shape (no password_hash)
+│   ├── enums/
+│   │   └── permissions.rs             # Role enum and Permission enum
 │   ├── handlers/
-│   │   ├── mod.rs           # Re-exports for all handlers
-│   │   ├── auth.rs          # login, register, forgot_password endpoints
-│   │   └── admin.rs         # admin-only endpoints
-│   └── error.rs             # Unified error type and HTTP error responses
+│   │   ├── mod.rs                     # Re-exports for all handlers
+│   │   ├── auth.rs                    # login, register, forgot_password endpoints
+│   │   └── admin.rs                   # admin-only endpoints
+│   └── utils/
+│       ├── error.rs                   # Unified error type and HTTP error responses
+│       └── middleware.rs              # Axum extractors that enforce auth and roles
 ```
 
 Each file has a single responsibility. You can read any one file in isolation and understand what it does.
+
+> **Why this structure?** Grouping by technical layer (`database/`, `dto/`, `enums/`, `utils/`) rather than a flat src/ keeps related code co-located and makes it obvious where to find things as the codebase grows.
 
 ---
 
@@ -123,28 +132,25 @@ Here are the crates you will add and the reason for each one. Understanding your
 Create the directories and empty files first. This forces you to think about structure before implementation.
 
 ```bash
-mkdir src/auth
-mkdir src/handlers
-touch src/db.rs
-touch src/models.rs
-touch src/permissions.rs
-touch src/middleware.rs
-touch src/error.rs
-touch src/auth/mod.rs
-touch src/auth/password.rs
-touch src/auth/token.rs
-touch src/handlers/mod.rs
-touch src/handlers/auth.rs
-touch src/handlers/admin.rs
+mkdir -p src/auth src/database/models src/dto/responses src/enums src/handlers src/utils
+touch src/auth/mod.rs src/auth/password.rs src/auth/token.rs
+touch src/database/db.rs src/database/models/user.rs
+touch src/dto/responses/user-reponse.rs
+touch src/enums/permissions.rs
+touch src/handlers/mod.rs src/handlers/auth.rs src/handlers/admin.rs
+touch src/utils/error.rs src/utils/middleware.rs
 ```
 
 On Windows with PowerShell:
 
 ```powershell
-New-Item -ItemType Directory -Path src/auth, src/handlers
-New-Item -ItemType File -Path src/db.rs, src/models.rs, src/permissions.rs, src/middleware.rs, src/error.rs
+New-Item -ItemType Directory -Path src/auth, src/database/models, src/dto/responses, src/enums, src/handlers, src/utils
 New-Item -ItemType File -Path src/auth/mod.rs, src/auth/password.rs, src/auth/token.rs
+New-Item -ItemType File -Path src/database/db.rs, src/database/models/user.rs
+New-Item -ItemType File -Path src/dto/responses/user-reponse.rs
+New-Item -ItemType File -Path src/enums/permissions.rs
 New-Item -ItemType File -Path src/handlers/mod.rs, src/handlers/auth.rs, src/handlers/admin.rs
+New-Item -ItemType File -Path src/utils/error.rs, src/utils/middleware.rs
 ```
 
 ---
@@ -201,7 +207,7 @@ Run `cargo build` after editing this. Rust will fetch and compile all dependenci
 
 ## Step 3 — Error Handling
 
-**File: `src/error.rs`**
+**File: `src/utils/error.rs`**
 
 > **Why this comes first:** `AppError` is used by almost every other module — password hashing, JWT tokens, the database layer, middleware, and all handlers. Define it first so everything else can import and use it without circular dependencies.
 
@@ -264,7 +270,7 @@ Notice that `Database` and `Internal` both return a generic `"Internal server er
 
 ## Step 4 — The Permissions Enum and Roles
 
-**File: `src/permissions.rs`**
+**File: `src/enums/permissions.rs`**
 
 ### Why an Enum, Not Just a String?
 
@@ -280,7 +286,32 @@ pub enum Role {
 }
 ```
 
-You also need a way to convert between the database string and the enum. Implement `From<String> for Role` (or `TryFrom`) and `From<Role> for String`.
+You also need a way to convert between the database string and the enum. Use `TryFrom<String>` (not `From<String>`) because an unknown role string in the database is a real error — you want to propagate it, not silently default to `User`. Also implement `From<Role> for String` for the reverse direction.
+
+```rust
+impl TryFrom<String> for Role {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        match s.as_str() {
+            "admin" => Ok(Role::Admin),
+            "user"  => Ok(Role::User),
+            _       => Err(format!("Invalid role: {}", s)),
+        }
+    }
+}
+
+impl From<Role> for String {
+    fn from(r: Role) -> Self {
+        match r {
+            Role::Admin => "admin".to_string(),
+            Role::User  => "user".to_string(),
+        }
+    }
+}
+```
+
+> **Why `TryFrom` instead of `From`?** `From` is infallible by contract — it cannot return an error. Since an unexpected role string is possible (e.g. a manual DB edit), `TryFrom` is the honest choice. The middleware maps a failed conversion to `AppError::Unauthorized`.
 
 ### The `Permission` Enum
 
@@ -322,7 +353,7 @@ pub fn permissions_for_role(role: &Role) -> Vec<Permission> {
 And a helper:
 
 ```rust
-pub fn has_permission(role: &Role, permission: &Permission) -> bool {
+pub fn has_permissions(role: &Role, permission: &Permission) -> bool {
     permissions_for_role(role).contains(permission)
 }
 ```
@@ -335,49 +366,71 @@ You could. But hardcoding role checks throughout your handlers is fragile. If yo
 
 ## Step 5 — Models and Request/Response Types
 
-**File: `src/models.rs`**
+**Files: `src/database/models/user.rs` and `src/dto/responses/user-reponse.rs`**
 
 This file contains all the Rust structs that represent data. Think of it as the contract between your application layers.
 
-### User (Database Row)
+### User (Database Row) — `src/database/models/user.rs`
+
+Use typed fields rather than plain strings where the type carries meaning:
 
 ```rust
-#[derive(Debug, Clone, serde::Serialize)]
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
+use crate::enums::permissions::Role;
+
+#[derive(Debug, Clone)]
 pub struct User {
-    pub id: String,
-    pub username: String,
-    pub email: String,
-    pub password_hash: String,  // Never serialize this in responses!
-    pub role: Role,
-    pub created_at: String,
-    pub updated_at: String,
+    pub id:            Uuid,              // not String — UUID validity enforced by type
+    pub username:      String,
+    pub email:         String,
+    pub password_hash: String,            // Never serialize this in responses!
+    pub role:          Role,
+    pub created_at:    DateTime<Utc>,     // not String — parse once, use everywhere
+    pub updated_at:    DateTime<Utc>,
 }
 ```
 
-### UserResponse (What You Send Back to the Client)
+> **Why `Uuid` instead of `String`?** If `id` is a `String`, any string is valid — you will never get a compile error if you accidentally pass a username where an ID was expected. `Uuid` is a distinct type; the compiler prevents that mix-up.
+>
+> **Why `DateTime<Utc>` instead of `String`?** You only parse the RFC-3339 string **once** (when reading from SQLite). After that, the type carries timezone-aware semantics. Comparing timestamps, computing durations, and formatting for JSON all work directly on `DateTime<Utc>` — no repeated parsing, no format bugs.
 
-**Never send `password_hash` to the client.** Create a separate response type:
+### UserResponse (What You Send Back to the Client) — `src/dto/responses/user-reponse.rs`
+
+**Never send `password_hash` to the client.** Create a separate response type in the `dto` layer:
 
 ```rust
 #[derive(Debug, serde::Serialize)]
 pub struct UserResponse {
-    pub id: String,
-    pub username: String,
-    pub email: String,
-    pub role: String,
-    pub created_at: String,
+    pub id:         String,      // Uuid serialised to its hyphenated string form
+    pub username:   String,
+    pub email:      String,
+    pub role:       String,
+    pub created_at: String,      // RFC-3339 string for JSON consumers
+}
+
+impl From<User> for UserResponse {
+    fn from(u: User) -> Self {
+        UserResponse {
+            id:         u.id.to_string(),
+            username:   u.username,
+            email:      u.email,
+            role:       String::from(u.role),
+            created_at: u.created_at.to_rfc3339(),
+        }
+    }
 }
 ```
 
 This is a critical security principle: **your internal model and your API response type are different structs**. The compiler enforces that you cannot accidentally leak the hash.
 
-### Request Payloads (What the Client Sends to You)
+### Request Payloads (What the Client Sends to You) — add to `src/database/models/user.rs`
 
 ```rust
 #[derive(Debug, serde::Deserialize)]
 pub struct RegisterRequest {
     pub username: String,
-    pub email: String,
+    pub email:    String,
     pub password: String,
 }
 
@@ -394,15 +447,15 @@ pub struct ForgotPasswordRequest {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct ResetPasswordRequest {
-    pub token: String,
+    pub token:        String,
     pub new_password: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub struct AdminUpdateUserRequest {
     pub username: Option<String>,
-    pub email: Option<String>,
-    pub role: Option<String>,
+    pub email:    Option<String>,
+    pub role:     Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -413,15 +466,15 @@ pub struct AdminResetPasswordRequest {
 
 Notice that `AdminUpdateUserRequest` uses `Option<String>` for all fields. This is the **partial update pattern** — the client only sends the fields they want to change. If a field is `None`, you leave it unchanged in the database.
 
-### The Claims Struct (JWT Payload)
+### The Claims Struct (JWT Payload) — add to `src/database/models/user.rs`
 
 ```rust
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Claims {
-    pub sub: String,   // Subject — the user's UUID
-    pub role: String,  // The user's role as a string
-    pub exp: usize,    // Expiry timestamp (Unix epoch seconds)
-    pub iat: usize,    // Issued-at timestamp
+    pub sub:  String, // Subject — the user's UUID (as a plain string; JWT spec uses strings)
+    pub role: String, // The user's role as a string
+    pub exp:  usize,  // Expiry timestamp (Unix epoch seconds)
+    pub iat:  usize,  // Issued-at timestamp
 }
 ```
 
@@ -502,9 +555,18 @@ The signing secret should be a long, random string (at least 32 characters). For
 Set tokens to expire after 24 hours (or less). In `Claims`, `exp` is a Unix timestamp (seconds since January 1, 1970). Compute it with `chrono`:
 
 ```rust
-let expiry = chrono::Utc::now()
+use chrono::Utc;
+
+// Utc::now() returns a DateTime<Utc> — the current UTC instant
+let now = Utc::now();
+
+// .timestamp() converts to Unix seconds (i64); cast to usize for the JWT claim
+let iat = now.timestamp() as usize;
+
+// checked_add_signed adds a Duration safely (returns None on overflow)
+let exp = now
     .checked_add_signed(chrono::Duration::hours(24))
-    .unwrap()
+    .ok_or_else(|| AppError::Internal("timestamp overflow".to_string()))?
     .timestamp() as usize;
 ```
 
@@ -522,7 +584,7 @@ Why not JWTs? Because you need to be able to **invalidate** them after use. JWTs
 
 ## Step 8 — The Database Layer (SQLite Seed)
 
-**File: `src/db.rs`**
+**File: `src/database/db.rs`**
 
 > **Why this comes after password hashing:** The seed data function calls `hash_password()` from `src/auth/password.rs`. If you write `db.rs` first, you will not have a function to call yet.
 
@@ -582,11 +644,23 @@ Create at least:
 
 Hash the passwords when seeding. Do not seed plain text passwords — this reinforces the habit.
 
+Use `uuid::Uuid::new_v4().to_string()` for each user's `id`, and `chrono::Utc::now().to_rfc3339()` for `created_at` / `updated_at`. Storing timestamps as RFC-3339 strings in the `TEXT` column means they sort lexicographically and can be parsed back to `DateTime<Utc>` with `chrono::DateTime::parse_from_rfc3339` at read time.
+
+```rust
+let now = chrono::Utc::now().to_rfc3339();  // e.g. "2026-08-09T12:34:56.789012300Z"
+
+let users = vec![
+    (uuid::Uuid::new_v4().to_string(), "admin", "admin@example.com", "admin123",  "admin"),
+    (uuid::Uuid::new_v4().to_string(), "alice", "alice@example.com", "password1", "user"),
+    (uuid::Uuid::new_v4().to_string(), "bob",   "bob@example.com",   "password2", "user"),
+];
+```
+
 ---
 
 ## Step 9 — Middleware
 
-**File: `src/middleware.rs`**
+**File: `src/utils/middleware.rs`**
 
 ### What Is Middleware?
 
@@ -611,8 +685,9 @@ Implement `FromRequestParts<AppState>` for it. In the implementation:
 2. Check it starts with `"Bearer "`
 3. Extract the token string after `"Bearer "`
 4. Call `validate_token()` from your token module
-5. If validation succeeds, return `AuthenticatedUser { user_id: claims.sub, role: ... }`
-6. If anything fails, return a `401 Unauthorized` response
+5. Convert the role string using `Role::try_from(claims.role).map_err(|_| AppError::Unauthorized)?` — if the stored role is unrecognised, treat it as auth failure
+6. If validation succeeds, return `AuthenticatedUser { user_id: claims.sub, role }`
+7. If anything fails, return a `401 Unauthorized` response
 
 Any handler that has `AuthenticatedUser` as a parameter will automatically require a valid JWT. Handlers that do not have it (login, register) are public.
 
@@ -671,9 +746,10 @@ Steps:
 2. Validate input — username and email should not be empty, password should be at least 8 characters
 3. Check if the username or email already exists in the DB (return `409 Conflict` if so)
 4. Hash the password with `hash_password()`
-5. Generate a UUID for the new user
-6. Insert the user into the `users` table with `role = "user"` (users cannot self-register as admin)
-7. Return a `UserResponse` (not the full `User` — never return the hash)
+5. Generate a UUID: `uuid::Uuid::new_v4().to_string()`
+6. Stamp the current time: `chrono::Utc::now().to_rfc3339()` for `created_at` and `updated_at`
+7. Insert the user into the `users` table with `role = "user"` (users cannot self-register as admin)
+8. Return a `UserResponse` (not the full `User` — never return the hash)
 
 ### POST `/auth/login`
 
@@ -699,9 +775,10 @@ Steps:
 1. Look up the user by email
 2. If found:
    a. Generate a random 32-byte token using `rand` and encode it as a hex string
-   b. Set expiry to 30 minutes from now
-   c. Insert into `password_reset_tokens`
-   d. "Send" the email — for this exercise, just `tracing::info!("Reset token for {}: {}", email, token)` to the log. In production you would call an email API (SendGrid, AWS SES, etc.)
+   b. Generate a UUID for the token row's own `id`: `uuid::Uuid::new_v4().to_string()`
+   c. Set expiry to 30 minutes from now: `(chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339()`
+   d. Insert into `password_reset_tokens`
+   e. "Send" the email — for this exercise, just `tracing::info!("Reset token for {}: {}", email, token)` to the log. In production you would call an email API (SendGrid, AWS SES, etc.)
 3. Return `200 OK` with a generic message like `"If that email is registered, a reset link has been sent"`
 
 ### POST `/auth/reset-password`
@@ -713,9 +790,9 @@ Steps:
 1. Look up the token in `password_reset_tokens`
 2. If not found, return `400 Bad Request`
 3. Check `used == 0` — if already used, return `400`
-4. Check `expires_at` — if expired, return `400`
+4. Check `expires_at` — parse with `chrono::DateTime::parse_from_rfc3339(&expires_at)` and compare against `chrono::Utc::now()`; if expired, return `400`
 5. Hash the new password
-6. Update the user's `password_hash` in the `users` table
+6. Update the user's `password_hash` and `updated_at` (`chrono::Utc::now().to_rfc3339()`) in the `users` table
 7. Mark the token as `used = 1` in `password_reset_tokens`
 8. Return `200 OK`
 
@@ -733,8 +810,9 @@ All of these endpoints require `AdminUser` as an extractor parameter.
 
 Steps:
 1. Query all users from the DB
-2. Map each `User` to a `UserResponse` (strip the hash)
-3. Return the list
+2. For each row, parse `id` with `uuid::Uuid::parse_str(...)` and timestamps with `chrono::DateTime::parse_from_rfc3339(...)` to reconstruct a typed `User`
+3. Map each `User` to a `UserResponse` (strip the hash)
+4. Return the list
 
 ### PATCH `/admin/users/:id`
 
@@ -745,7 +823,7 @@ Steps:
 1. Extract the `:id` path parameter
 2. Look up the user — if not found, return `404`
 3. Apply only the `Some(...)` fields from the request (partial update)
-4. Update `updated_at` to now
+4. Update `updated_at` to `chrono::Utc::now().to_rfc3339()`
 5. Run the UPDATE query
 6. Return the updated user as `UserResponse`
 
@@ -777,7 +855,16 @@ Steps:
 
 **File: `src/main.rs`**
 
-This is where everything is assembled.
+This is where everything is assembled. Declare all the top-level modules here:
+
+```rust
+mod auth;
+mod database;
+mod dto;
+mod enums;
+mod handlers;
+mod utils;
+```
 
 ### App State
 
@@ -786,7 +873,7 @@ Define a struct to hold shared state — the database connection and the JWT sec
 ```rust
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Arc<Mutex<Connection>>,
+    pub db:         Arc<Mutex<Connection>>,
     pub jwt_secret: String,
 }
 ```
@@ -800,16 +887,16 @@ Axum uses a builder pattern for routes:
 ```rust
 let app = Router::new()
     // Public routes
-    .route("/auth/register",        post(auth::register))
-    .route("/auth/login",           post(auth::login))
-    .route("/auth/forgot-password", post(auth::forgot_password))
-    .route("/auth/reset-password",  post(auth::reset_password))
+    .route("/auth/register",        post(handlers::auth::register))
+    .route("/auth/login",           post(handlers::auth::login))
+    .route("/auth/forgot-password", post(handlers::auth::forgot_password))
+    .route("/auth/reset-password",  post(handlers::auth::reset_password))
     // Protected routes (require valid JWT — enforced by AuthenticatedUser extractor)
     // Admin routes (require admin role — enforced by AdminUser extractor)
-    .route("/admin/users",                    get(admin::list_users))
-    .route("/admin/users/:id",                patch(admin::update_user))
-    .route("/admin/users/:id",                delete(admin::delete_user))
-    .route("/admin/users/:id/reset-password", post(admin::reset_user_password))
+    .route("/admin/users",                    get(handlers::admin::list_users))
+    .route("/admin/users/:id",                patch(handlers::admin::update_user))
+    .route("/admin/users/:id",                delete(handlers::admin::delete_user))
+    .route("/admin/users/:id/reset-password", post(handlers::admin::reset_user_password))
     .with_state(state);
 ```
 
@@ -887,7 +974,7 @@ For database-touching code, use a **test helper function** that creates a fresh 
 
 ---
 
-### Tests for `src/permissions.rs`
+### Tests for `src/enums/permissions.rs`
 
 These tests verify your RBAC logic. They are pure logic with no I/O — fast and simple.
 
@@ -900,58 +987,59 @@ mod tests {
 
     #[test]
     fn test_role_from_string_user() {
-        let role = Role::from("user".to_string());
-        assert_eq!(role, Role::User);
+        assert_eq!(Role::try_from("user".to_string()), Ok(Role::User));
     }
 
     #[test]
     fn test_role_from_string_admin() {
-        let role = Role::from("admin".to_string());
-        assert_eq!(role, Role::Admin);
+        assert_eq!(Role::try_from("admin".to_string()), Ok(Role::Admin));
+    }
+
+    #[test]
+    fn test_role_from_string_invalid() {
+        assert!(Role::try_from("superuser".to_string()).is_err());
     }
 
     #[test]
     fn test_role_to_string_user() {
-        let s = String::from(Role::User);
-        assert_eq!(s, "user");
+        assert_eq!(String::from(Role::User), "user");
     }
 
     #[test]
     fn test_role_to_string_admin() {
-        let s = String::from(Role::Admin);
-        assert_eq!(s, "admin");
+        assert_eq!(String::from(Role::Admin), "admin");
     }
 
     // --- User role permissions ---
 
     #[test]
     fn test_user_role_has_read_own_profile() {
-        assert!(has_permission(&Role::User, &Permission::ReadOwnProfile));
+        assert!(has_permissions(&Role::User, &Permission::ReadOwnProfile));
     }
 
     #[test]
     fn test_user_role_has_update_own_profile() {
-        assert!(has_permission(&Role::User, &Permission::UpdateOwnProfile));
+        assert!(has_permissions(&Role::User, &Permission::UpdateOwnProfile));
     }
 
     #[test]
     fn test_user_role_cannot_read_all_users() {
-        assert!(!has_permission(&Role::User, &Permission::ReadAllUsers));
+        assert!(!has_permissions(&Role::User, &Permission::ReadAllUsers));
     }
 
     #[test]
     fn test_user_role_cannot_delete_any_user() {
-        assert!(!has_permission(&Role::User, &Permission::DeleteAnyUser));
+        assert!(!has_permissions(&Role::User, &Permission::DeleteAnyUser));
     }
 
     #[test]
     fn test_user_role_cannot_update_any_user() {
-        assert!(!has_permission(&Role::User, &Permission::UpdateAnyUser));
+        assert!(!has_permissions(&Role::User, &Permission::UpdateAnyUser));
     }
 
     #[test]
     fn test_user_role_cannot_reset_any_password() {
-        assert!(!has_permission(&Role::User, &Permission::ResetAnyUserPassword));
+        assert!(!has_permissions(&Role::User, &Permission::ResetAnyUserPassword));
     }
 
     // --- Admin role permissions ---
@@ -968,7 +1056,7 @@ mod tests {
         ];
         for permission in &all_permissions {
             assert!(
-                has_permission(&Role::Admin, permission),
+                has_permissions(&Role::Admin, permission),
                 "Admin should have permission {:?}",
                 permission
             );
@@ -981,7 +1069,7 @@ mod tests {
         let user_permissions = permissions_for_role(&Role::User);
         for permission in &user_permissions {
             assert!(
-                has_permission(&Role::Admin, permission),
+                has_permissions(&Role::Admin, permission),
                 "Admin should have User permission {:?}",
                 permission
             );
@@ -991,7 +1079,7 @@ mod tests {
 ```
 
 **What these tests cover:**
-- `Role` round-trips correctly through string conversion
+- `Role` round-trips correctly through string conversion (and rejects unknown strings via `TryFrom`)
 - Each role has exactly the permissions it should have
 - The subset relationship between User and Admin permissions is maintained
 - The `assert!(..., "message")` pattern gives a clear failure message if a test fails
@@ -1171,7 +1259,7 @@ mod tests {
 
 ---
 
-### Tests for `src/error.rs`
+### Tests for `src/utils/error.rs`
 
 Test that your `AppError` variants produce the correct HTTP status codes.
 
@@ -1242,7 +1330,7 @@ mod tests {
 
 ---
 
-### Tests for `src/db.rs`
+### Tests for `src/database/db.rs`
 
 Database tests use a fresh in-memory database per test. Define a test helper:
 
@@ -1347,6 +1435,24 @@ mod tests {
             .unwrap();
         assert_eq!(total, unique, "All user IDs must be unique");
     }
+
+    #[test]
+    fn test_user_ids_are_valid_uuids() {
+        let conn = test_db();
+        let mut stmt = conn.prepare("SELECT id FROM users").unwrap();
+        let ids: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for id in &ids {
+            assert!(
+                uuid::Uuid::parse_str(id).is_ok(),
+                "id '{}' is not a valid UUID",
+                id
+            );
+        }
+    }
 }
 ```
 
@@ -1355,35 +1461,38 @@ mod tests {
 - Testing schema existence separately from data existence (if schema fails, you know why)
 - Asserting the hash format as a proxy for "password was hashed" — a lightweight but effective check
 - Uniqueness assertions catch bugs where UUID generation might accidentally repeat
+- UUID validity assertions confirm `uuid::Uuid::new_v4()` is being used (not plain strings or sequential IDs)
 
 ---
 
-### Tests for `src/models.rs`
+### Tests for `src/dto/responses/user-reponse.rs`
 
-Test that your model conversions work correctly, particularly `User` → `UserResponse`.
+Test that your model conversions work correctly, particularly `User` → `UserResponse`. Since `User` now uses typed fields (`Uuid`, `DateTime<Utc>`), construct it accordingly:
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use uuid::Uuid;
+    use crate::enums::permissions::Role;
+    use crate::database::models::user::User;
 
     fn sample_user() -> User {
         User {
-            id: "test-uuid".to_string(),
-            username: "alice".to_string(),
-            email: "alice@example.com".to_string(),
+            id:            Uuid::new_v4(),
+            username:      "alice".to_string(),
+            email:         "alice@example.com".to_string(),
             password_hash: "$argon2id$v=19$very_secret_hash".to_string(),
-            role: Role::User,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            role:          Role::User,
+            created_at:    Utc::now(),
+            updated_at:    Utc::now(),
         }
     }
 
     #[test]
     fn test_user_response_does_not_contain_password_hash() {
-        let user = sample_user();
-        let response = UserResponse::from(user); // implement From<User> for UserResponse
-        // Serialize to JSON and confirm the hash is absent
+        let response = UserResponse::from(sample_user());
         let json = serde_json::to_string(&response).unwrap();
         assert!(
             !json.contains("password_hash"),
@@ -1396,24 +1505,24 @@ mod tests {
     }
 
     #[test]
-    fn test_user_response_preserves_id() {
-        let user = sample_user();
-        let response = UserResponse::from(user);
-        assert_eq!(response.id, "test-uuid");
+    fn test_user_response_id_is_valid_uuid_string() {
+        let id_str = UserResponse::from(sample_user()).id;
+        assert!(Uuid::parse_str(&id_str).is_ok(), "id must be a valid UUID string");
     }
 
     #[test]
     fn test_user_response_preserves_username() {
-        let user = sample_user();
-        let response = UserResponse::from(user);
-        assert_eq!(response.username, "alice");
+        assert_eq!(UserResponse::from(sample_user()).username, "alice");
     }
 
     #[test]
     fn test_user_response_preserves_email() {
-        let user = sample_user();
-        let response = UserResponse::from(user);
-        assert_eq!(response.email, "alice@example.com");
+        assert_eq!(UserResponse::from(sample_user()).email, "alice@example.com");
+    }
+
+    #[test]
+    fn test_user_response_role_is_string() {
+        assert_eq!(UserResponse::from(sample_user()).role, "user");
     }
 }
 ```
@@ -1428,8 +1537,8 @@ When you run `cargo test`, you will see output like:
 
 ```
 running 32 tests
-test permissions::tests::test_user_role_has_read_own_profile ... ok
-test permissions::tests::test_user_role_cannot_delete_any_user ... ok
+test enums::permissions::tests::test_user_role_has_read_own_profile ... ok
+test enums::permissions::tests::test_user_role_cannot_delete_any_user ... ok
 test auth::password::tests::test_same_password_produces_different_hashes ... ok
 ...
 test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
