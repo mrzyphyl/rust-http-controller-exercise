@@ -2,7 +2,7 @@
 
 ## What Is This Project?
 
-This is a skill-building exercise where you will build a **REST API in Rust** from scratch. It covers authentication, authorization, middleware, password security, and database access — the core pillars of almost every real-world backend service.
+This is a skill-building exercise where you will build a **RESTful API in Rust** from scratch. It covers authentication, authorization, middleware, password security, and database access — the core pillars of almost every real-world backend service.
 
 You will not use a database server like PostgreSQL or MySQL. Instead, you will use **SQLite** — a file-based (or in-memory) database — so you can run everything locally with zero infrastructure setup. This keeps the focus on learning Rust patterns, not DevOps.
 
@@ -15,20 +15,21 @@ You will not use a database server like PostgreSQL or MySQL. Instead, you will u
 3. [Dependency Choices and Why](#3-dependency-choices-and-why)
 4. [Step 1 — Project Structure](#step-1--project-structure)
 5. [Step 2 — Cargo.toml Dependencies](#step-2--cargotoml-dependencies)
-6. [Step 3 — Error Handling](#step-3--error-handling)
-7. [Step 4 — The Permissions Enum and Roles](#step-4--the-permissions-enum-and-roles)
-8. [Step 5 — Models and Request/Response Types](#step-5--models-and-requestresponse-types)
-9. [Step 6 — Password Hashing](#step-6--password-hashing)
-10. [Step 7 — JWT and Authentication Tokens](#step-7--jwt-and-authentication-tokens)
-11. [Step 8 — The Database Layer (SQLite Seed)](#step-8--the-database-layer-sqlite-seed)
-12. [Step 9 — Middleware](#step-9--middleware)
-13. [Step 10 — Auth Endpoints](#step-10--auth-endpoints)
-14. [Step 11 — Admin Endpoints](#step-11--admin-endpoints)
-15. [Step 12 — Wiring It All Together in main.rs](#step-12--wiring-it-all-together-in-mainrs)
-16. [Step 13 — Unit Tests](#step-13--unit-tests)
-17. [Best Practices Checklist](#best-practices-checklist)
-18. [How to Test Your Endpoints](#how-to-test-your-endpoints)
-19. [Glossary](#glossary)
+6. [Step 3 — Module Declarations (mod.rs files)](#step-3--module-declarations-modrs-files)
+7. [Step 4 — Error Handling](#step-4--error-handling)
+8. [Step 5 — The Permissions Enum and Roles](#step-5--the-permissions-enum-and-roles)
+9. [Step 6 — Models and Request/Response Types](#step-6--models-and-requestresponse-types)
+10. [Step 7 — Password Hashing](#step-7--password-hashing)
+11. [Step 8 — JWT and Authentication Tokens](#step-8--jwt-and-authentication-tokens)
+12. [Step 9 — The Database Layer (SQLite Seed)](#step-9--the-database-layer-sqlite-seed)
+13. [Step 10 — Middleware](#step-10--middleware)
+14. [Step 11 — Auth Endpoints](#step-11--auth-endpoints)
+15. [Step 12 — Admin Endpoints](#step-12--admin-endpoints)
+16. [Step 13 — Wiring It All Together in main.rs](#step-13--wiring-it-all-together-in-mainrs)
+17. [Step 14 — Unit Tests](#step-14--unit-tests)
+18. [Best Practices Checklist](#best-practices-checklist)
+19. [How to Test Your Endpoints](#how-to-test-your-endpoints)
+20. [Glossary](#glossary)
 
 ---
 
@@ -81,30 +82,45 @@ rust-http-controllers/
 ├── src/
 │   ├── main.rs                        # Entry point — wires everything together
 │   ├── auth/
-│   │   ├── mod.rs                     # Re-exports for the auth module
+│   │   ├── mod.rs                     # Declares: password, token
 │   │   ├── password.rs                # Password hashing and verification
 │   │   └── token.rs                   # JWT creation and validation
 │   ├── database/
+│   │   ├── mod.rs                     # Declares: db, models
 │   │   ├── db.rs                      # SQLite connection, schema creation, and seed data
 │   │   └── models/
-│   │       └── user.rs                # User row struct + Claims + all request payload structs
+│   │       ├── mod.rs                 # Declares: user, claims
+│   │       ├── user.rs                # User row struct (typed id + timestamps)
+│   │       └── claims.rs              # JWT Claims struct
 │   ├── dto/
+│   │   ├── mod.rs                     # Declares: requests, responses
+│   │   ├── requests/
+│   │   │   ├── mod.rs                 # Declares all request structs
+│   │   │   ├── register-request.rs
+│   │   │   ├── login-request.rs
+│   │   │   ├── forgot-password-request.rs
+│   │   │   ├── reset-password-request.rs
+│   │   │   ├── admin-update-user-request.rs
+│   │   │   └── admin-reset-password-request.rs
 │   │   └── responses/
+│   │       ├── mod.rs                 # Declares: user_reponse
 │   │       └── user-reponse.rs        # UserResponse — safe API shape (no password_hash)
 │   ├── enums/
+│   │   ├── mod.rs                     # Declares: permissions
 │   │   └── permissions.rs             # Role enum and Permission enum
 │   ├── handlers/
-│   │   ├── mod.rs                     # Re-exports for all handlers
+│   │   ├── mod.rs                     # Declares: auth, admin
 │   │   ├── auth.rs                    # login, register, forgot_password endpoints
 │   │   └── admin.rs                   # admin-only endpoints
 │   └── utils/
+│       ├── mod.rs                     # Declares: error, middleware
 │       ├── error.rs                   # Unified error type and HTTP error responses
 │       └── middleware.rs              # Axum extractors that enforce auth and roles
 ```
 
 Each file has a single responsibility. You can read any one file in isolation and understand what it does.
 
-> **Why this structure?** Grouping by technical layer (`database/`, `dto/`, `enums/`, `utils/`) rather than a flat src/ keeps related code co-located and makes it obvious where to find things as the codebase grows.
+> **Why this structure?** Grouping by technical layer (`database/`, `dto/`, `enums/`, `utils/`) rather than a flat `src/` keeps related code co-located and makes it obvious where to find things as the codebase grows. Splitting each request DTO into its own file under `dto/requests/` means imports are explicit — you always know exactly which payload a handler depends on.
 
 ---
 
@@ -132,25 +148,54 @@ Here are the crates you will add and the reason for each one. Understanding your
 Create the directories and empty files first. This forces you to think about structure before implementation.
 
 ```bash
-mkdir -p src/auth src/database/models src/dto/responses src/enums src/handlers src/utils
+mkdir -p src/auth src/database/models src/dto/requests src/dto/responses \
+         src/enums src/handlers src/utils
+
 touch src/auth/mod.rs src/auth/password.rs src/auth/token.rs
-touch src/database/db.rs src/database/models/user.rs
-touch src/dto/responses/user-reponse.rs
-touch src/enums/permissions.rs
+touch src/database/mod.rs src/database/db.rs
+touch src/database/models/mod.rs src/database/models/user.rs src/database/models/claims.rs
+touch src/dto/mod.rs
+touch src/dto/requests/mod.rs \
+      src/dto/requests/register-request.rs \
+      src/dto/requests/login-request.rs \
+      src/dto/requests/forgot-password-request.rs \
+      src/dto/requests/reset-password-request.rs \
+      src/dto/requests/admin-update-user-request.rs \
+      src/dto/requests/admin-reset-password-request.rs
+touch src/dto/responses/mod.rs src/dto/responses/user-reponse.rs
+touch src/enums/mod.rs src/enums/permissions.rs
 touch src/handlers/mod.rs src/handlers/auth.rs src/handlers/admin.rs
-touch src/utils/error.rs src/utils/middleware.rs
+touch src/utils/mod.rs src/utils/error.rs src/utils/middleware.rs
 ```
 
 On Windows with PowerShell:
 
 ```powershell
-New-Item -ItemType Directory -Path src/auth, src/database/models, src/dto/responses, src/enums, src/handlers, src/utils
+New-Item -ItemType Directory -Path src/auth
+New-Item -ItemType Directory -Path src/database/models
+New-Item -ItemType Directory -Path src/dto/requests
+New-Item -ItemType Directory -Path src/dto/responses
+New-Item -ItemType Directory -Path src/enums
+New-Item -ItemType Directory -Path src/handlers
+New-Item -ItemType Directory -Path src/utils
+
 New-Item -ItemType File -Path src/auth/mod.rs, src/auth/password.rs, src/auth/token.rs
-New-Item -ItemType File -Path src/database/db.rs, src/database/models/user.rs
+New-Item -ItemType File -Path src/database/mod.rs, src/database/db.rs
+New-Item -ItemType File -Path src/database/models/mod.rs
+New-Item -ItemType File -Path src/database/models/user.rs, src/database/models/claims.rs
+New-Item -ItemType File -Path src/dto/mod.rs
+New-Item -ItemType File -Path src/dto/requests/mod.rs
+New-Item -ItemType File -Path src/dto/requests/register-request.rs
+New-Item -ItemType File -Path src/dto/requests/login-request.rs
+New-Item -ItemType File -Path src/dto/requests/forgot-password-request.rs
+New-Item -ItemType File -Path src/dto/requests/reset-password-request.rs
+New-Item -ItemType File -Path src/dto/requests/admin-update-user-request.rs
+New-Item -ItemType File -Path src/dto/requests/admin-reset-password-request.rs
+New-Item -ItemType File -Path src/dto/responses/mod.rs
 New-Item -ItemType File -Path src/dto/responses/user-reponse.rs
-New-Item -ItemType File -Path src/enums/permissions.rs
+New-Item -ItemType File -Path src/enums/mod.rs, src/enums/permissions.rs
 New-Item -ItemType File -Path src/handlers/mod.rs, src/handlers/auth.rs, src/handlers/admin.rs
-New-Item -ItemType File -Path src/utils/error.rs, src/utils/middleware.rs
+New-Item -ItemType File -Path src/utils/mod.rs, src/utils/error.rs, src/utils/middleware.rs
 ```
 
 ---
@@ -205,7 +250,87 @@ Run `cargo build` after editing this. Rust will fetch and compile all dependenci
 
 ---
 
-## Step 3 — Error Handling
+## Step 3 — Module Declarations (`mod.rs` files)
+
+### Why every directory needs a `mod.rs`
+
+Rust's module system is **explicit by design** — the compiler will not automatically discover `.rs` files inside a directory. When `main.rs` declares `mod dto;`, Rust looks for either `src/dto.rs` or `src/dto/mod.rs`. If `dto/mod.rs` doesn't exist, the build fails. Each `mod.rs` is the index for its directory: it declares which child modules exist and whether they are public.
+
+> **Hyphens vs underscores:** Rust module names must be valid identifiers — hyphens are not
+> allowed in identifiers. The file `forgot-password-request.rs` on disk is declared as
+> `pub mod forgot_password_request;` — Rust automatically maps the identifier
+> `forgot_password_request` to the filename `forgot-password-request.rs`.
+
+### `src/database/mod.rs`
+
+```rust
+pub mod db;
+pub mod models;
+```
+
+### `src/database/models/mod.rs`
+
+```rust
+pub mod claims;
+pub mod user;
+```
+
+### `src/dto/mod.rs`
+
+```rust
+pub mod requests;
+pub mod responses;
+```
+
+### `src/dto/requests/mod.rs`
+
+```rust
+pub mod admin_reset_password_request;
+pub mod admin_update_user_request;
+pub mod forgot_password_request;
+pub mod login_request;
+pub mod register_request;
+pub mod reset_password_request;
+```
+
+### `src/dto/responses/mod.rs`
+
+```rust
+pub mod user_reponse;
+```
+
+### `src/enums/mod.rs`
+
+```rust
+pub mod permissions;
+```
+
+### `src/utils/mod.rs`
+
+```rust
+pub mod error;
+pub mod middleware;
+```
+
+### `src/auth/mod.rs`
+
+```rust
+pub mod password;
+pub mod token;
+```
+
+### `src/handlers/mod.rs`
+
+```rust
+pub mod admin;
+pub mod auth;
+```
+
+---
+
+## Step 4 — Error Handling
+
+**File: `src/utils/error.rs`**
 
 **File: `src/utils/error.rs`**
 
@@ -268,7 +393,7 @@ Notice that `Database` and `Internal` both return a generic `"Internal server er
 
 ---
 
-## Step 4 — The Permissions Enum and Roles
+## Step 5 — The Permissions Enum and Roles
 
 **File: `src/enums/permissions.rs`**
 
@@ -364,11 +489,15 @@ You could. But hardcoding role checks throughout your handlers is fragile. If yo
 
 ---
 
-## Step 5 — Models and Request/Response Types
+## Step 6 — Models and Request/Response Types
 
-**Files: `src/database/models/user.rs` and `src/dto/responses/user-reponse.rs`**
+**Files:**
+- `src/database/models/user.rs` — the `User` database row struct
+- `src/database/models/claims.rs` — the JWT `Claims` struct
+- `src/dto/requests/*.rs` — one file per request payload
+- `src/dto/responses/user-reponse.rs` — the safe API response shape
 
-This file contains all the Rust structs that represent data. Think of it as the contract between your application layers.
+This is the contract between your application layers. Each type lives in its own file so imports are explicit — a handler's `use` statements tell you exactly which payloads it depends on.
 
 ### User (Database Row) — `src/database/models/user.rs`
 
@@ -395,37 +524,27 @@ pub struct User {
 >
 > **Why `DateTime<Utc>` instead of `String`?** You only parse the RFC-3339 string **once** (when reading from SQLite). After that, the type carries timezone-aware semantics. Comparing timestamps, computing durations, and formatting for JSON all work directly on `DateTime<Utc>` — no repeated parsing, no format bugs.
 
-### UserResponse (What You Send Back to the Client) — `src/dto/responses/user-reponse.rs`
+### JWT Claims — `src/database/models/claims.rs`
 
-**Never send `password_hash` to the client.** Create a separate response type in the `dto` layer:
+Keeping `Claims` separate from `User` makes the module boundary clear: `user.rs` is about the database row; `claims.rs` is about the JWT payload.
 
 ```rust
-#[derive(Debug, serde::Serialize)]
-pub struct UserResponse {
-    pub id:         String,      // Uuid serialised to its hyphenated string form
-    pub username:   String,
-    pub email:      String,
-    pub role:       String,
-    pub created_at: String,      // RFC-3339 string for JSON consumers
-}
-
-impl From<User> for UserResponse {
-    fn from(u: User) -> Self {
-        UserResponse {
-            id:         u.id.to_string(),
-            username:   u.username,
-            email:      u.email,
-            role:       String::from(u.role),
-            created_at: u.created_at.to_rfc3339(),
-        }
-    }
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Claims {
+    pub sub:  String, // user UUID (as string — JWT spec uses strings)
+    pub role: String,
+    pub exp:  usize,  // expiry (Unix seconds)
+    pub iat:  usize,  // issued-at (Unix seconds)
 }
 ```
 
-This is a critical security principle: **your internal model and your API response type are different structs**. The compiler enforces that you cannot accidentally leak the hash.
+`sub`, `exp`, and `iat` are standard JWT fields (called "claims"). The `jsonwebtoken` crate validates `exp` automatically.
 
-### Request Payloads (What the Client Sends to You) — add to `src/database/models/user.rs`
+### Request Payloads — `src/dto/requests/`
 
+Each request payload gets its own file. This keeps each file minimal and makes the dependency chain explicit in handler `use` statements.
+
+**`register-request.rs`**
 ```rust
 #[derive(Debug, serde::Deserialize)]
 pub struct RegisterRequest {
@@ -433,56 +552,88 @@ pub struct RegisterRequest {
     pub email:    String,
     pub password: String,
 }
+```
 
+**`login-request.rs`**
+```rust
 #[derive(Debug, serde::Deserialize)]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
 }
+```
 
+**`forgot-password-request.rs`**
+```rust
 #[derive(Debug, serde::Deserialize)]
 pub struct ForgotPasswordRequest {
     pub email: String,
 }
+```
 
+**`reset-password-request.rs`**
+```rust
 #[derive(Debug, serde::Deserialize)]
 pub struct ResetPasswordRequest {
     pub token:        String,
     pub new_password: String,
 }
+```
 
+**`admin-update-user-request.rs`**
+```rust
 #[derive(Debug, serde::Deserialize)]
 pub struct AdminUpdateUserRequest {
     pub username: Option<String>,
     pub email:    Option<String>,
     pub role:     Option<String>,
 }
+```
 
+All fields are `Option<String>` — the **partial update pattern**. The client only sends the fields they want to change. If a field is `None`, leave it unchanged in the database.
+
+**`admin-reset-password-request.rs`**
+```rust
 #[derive(Debug, serde::Deserialize)]
 pub struct AdminResetPasswordRequest {
     pub new_password: String,
 }
 ```
 
-Notice that `AdminUpdateUserRequest` uses `Option<String>` for all fields. This is the **partial update pattern** — the client only sends the fields they want to change. If a field is `None`, you leave it unchanged in the database.
+### UserResponse (What You Send Back to the Client) — `src/dto/responses/user-reponse.rs`
 
-### The Claims Struct (JWT Payload) — add to `src/database/models/user.rs`
+**Never send `password_hash` to the client.** The response type lives in the `dto` layer to make this separation structural, not just a convention:
 
 ```rust
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct Claims {
-    pub sub:  String, // Subject — the user's UUID (as a plain string; JWT spec uses strings)
-    pub role: String, // The user's role as a string
-    pub exp:  usize,  // Expiry timestamp (Unix epoch seconds)
-    pub iat:  usize,  // Issued-at timestamp
+use crate::database::models::user::User;
+
+#[derive(Debug, serde::Serialize)]
+pub struct UserResponse {
+    pub id:         String,       // Uuid serialised to its hyphenated string form
+    pub username:   String,
+    pub email:      String,
+    pub role:       String,
+    pub created_at: String,       // RFC-3339 string for JSON consumers
+}
+
+impl From<User> for UserResponse {
+    fn from(user: User) -> Self {
+        UserResponse {
+            id:         user.id.to_string(),
+            username:   user.username,
+            email:      user.email,
+            role:       String::from(user.role),
+            created_at: user.created_at.to_rfc3339(),
+        }
+    }
 }
 ```
 
-`sub`, `exp`, and `iat` are standard JWT fields (called "claims"). The `jsonwebtoken` crate validates `exp` automatically.
+This is a critical security principle: **your internal model and your API response type are different structs**. The compiler enforces that you cannot accidentally leak the hash.
 
 ---
 
-## Step 6 — Password Hashing
+## Step 7 — Password Hashing
 
 **File: `src/auth/password.rs`**
 
@@ -515,7 +666,7 @@ When verifying a password, the comparison must be **constant-time** — it must 
 
 ---
 
-## Step 7 — JWT and Authentication Tokens
+## Step 8 — JWT and Authentication Tokens
 
 **File: `src/auth/token.rs`**
 
@@ -582,7 +733,7 @@ Why not JWTs? Because you need to be able to **invalidate** them after use. JWTs
 
 ---
 
-## Step 8 — The Database Layer (SQLite Seed)
+## Step 9 — The Database Layer (SQLite Seed)
 
 **File: `src/database/db.rs`**
 
@@ -658,7 +809,7 @@ let users = vec![
 
 ---
 
-## Step 9 — Middleware
+## Step 10 — Middleware
 
 **File: `src/utils/middleware.rs`**
 
@@ -732,7 +883,7 @@ You cannot call this handler without an admin JWT. The compiler guarantees it.
 
 ---
 
-## Step 10 — Auth Endpoints
+## Step 11 — Auth Endpoints
 
 **File: `src/handlers/auth.rs`**
 
@@ -798,7 +949,7 @@ Steps:
 
 ---
 
-## Step 11 — Admin Endpoints
+## Step 12 — Admin Endpoints
 
 **File: `src/handlers/admin.rs`**
 
@@ -851,7 +1002,7 @@ Steps:
 
 ---
 
-## Step 12 — Wiring It All Together in main.rs
+## Step 13 — Wiring It All Together in main.rs
 
 **File: `src/main.rs`**
 
@@ -927,7 +1078,7 @@ RUST_LOG=info cargo run     # shows info and above
 
 ---
 
-## Step 13 — Unit Tests
+## Step 14 — Unit Tests
 
 ### Why Write Unit Tests?
 

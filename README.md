@@ -1,10 +1,10 @@
 # rust-http-controllers
 
-A skill-building project for learning how to build a REST API in Rust from scratch. Covers authentication, authorization, middleware, password security, SQLite database access, and unit testing using best practices.
+A skill-building project for learning how to build a **RESTful API in Rust** from scratch. Covers authentication, authorization, middleware, password security, SQLite database access, and unit testing using best practices.
 
 ## What This Project Builds
 
-A fully functional HTTP API with:
+A fully functional RESTful HTTP API with:
 
 - User registration and login (JWT-based)
 - Password reset via email token
@@ -83,23 +83,38 @@ Tokens expire after 24 hours.
 src/
 ├── main.rs                        # Entry point, routing, app state
 ├── auth/
-│   ├── mod.rs
+│   ├── mod.rs                     # Declares: password, token
 │   ├── password.rs                # Argon2 hashing and verification
 │   └── token.rs                   # JWT creation and validation
 ├── database/
+│   ├── mod.rs                     # Declares: db, models
 │   ├── db.rs                      # SQLite setup, schema, seed data
 │   └── models/
-│       └── user.rs                # User row struct, Claims, request payload structs
+│       ├── mod.rs                 # Declares: user, claims
+│       ├── user.rs                # User row struct (typed Uuid + DateTime<Utc>)
+│       └── claims.rs              # JWT Claims struct
 ├── dto/
+│   ├── mod.rs                     # Declares: requests, responses
+│   ├── requests/
+│   │   ├── mod.rs                 # Declares all request structs
+│   │   ├── register-request.rs
+│   │   ├── login-request.rs
+│   │   ├── forgot-password-request.rs
+│   │   ├── reset-password-request.rs
+│   │   ├── admin-update-user-request.rs
+│   │   └── admin-reset-password-request.rs
 │   └── responses/
-│       └── user-reponse.rs        # UserResponse — safe API shape (no password_hash)
+│       ├── mod.rs                 # Declares: user_reponse
+│       └── user-reponse.rs        # Safe API shape (no password_hash)
 ├── enums/
+│   ├── mod.rs                     # Declares: permissions
 │   └── permissions.rs             # Role and Permission enums
 ├── handlers/
-│   ├── mod.rs
+│   ├── mod.rs                     # Declares: auth, admin
 │   ├── auth.rs                    # Public auth endpoints
 │   └── admin.rs                   # Admin-only endpoints
 └── utils/
+    ├── mod.rs                     # Declares: error, middleware
     ├── error.rs                   # Unified AppError type
     └── middleware.rs              # Auth and admin extractors
 ```
