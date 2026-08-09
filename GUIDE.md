@@ -151,24 +151,45 @@ New-Item -ItemType File -Path src/handlers/mod.rs, src/handlers/auth.rs, src/han
 
 ## Step 2 — Cargo.toml Dependencies
 
-Replace the empty `[dependencies]` section with:
+Run the following commands to add all dependencies. Cargo will resolve and pin the latest compatible versions automatically.
 
-```toml
-[dependencies]
-axum = { version = "0.7", features = ["macros"] }
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-rusqlite = { version = "0.31", features = ["bundled"] }
-argon2 = "0.5"
-jsonwebtoken = "9"
-uuid = { version = "1", features = ["v4"] }
-chrono = { version = "0.4", features = ["serde"] }
-thiserror = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rand = "0.8"
+**bash / zsh (macOS, Linux, WSL):**
+
+```bash
+cargo add axum --features macros
+cargo add tokio --features full
+cargo add serde --features derive
+cargo add serde_json
+cargo add rusqlite --features bundled
+cargo add argon2
+cargo add jsonwebtoken
+cargo add uuid --features v4
+cargo add chrono --features serde
+cargo add thiserror
+cargo add tracing
+cargo add tracing-subscriber --features env-filter
+cargo add rand
 ```
+
+**PowerShell (Windows):**
+
+```powershell
+cargo add axum --features macros
+cargo add tokio --features full
+cargo add serde --features derive
+cargo add serde_json
+cargo add rusqlite --features bundled
+cargo add argon2
+cargo add jsonwebtoken
+cargo add uuid --features v4
+cargo add chrono --features serde
+cargo add thiserror
+cargo add tracing
+cargo add tracing-subscriber --features env-filter
+cargo add rand
+```
+
+The `cargo add` commands are identical on both shells — the separation is just for clarity. `cargo` is a cross-platform tool and behaves the same on Windows, macOS, and Linux.
 
 **Why `rand`?** You will need it to generate a secure random token for password reset emails, since those reset tokens are not JWTs — they are single-use secrets.
 
