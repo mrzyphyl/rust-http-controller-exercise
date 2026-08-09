@@ -1,0 +1,22 @@
+# Build output
+/target
+
+# Cargo lock (keep for binaries, ignore for libraries — uncomment if this is a library)
+# Cargo.lock
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE / editor
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
