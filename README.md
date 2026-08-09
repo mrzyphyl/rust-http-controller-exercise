@@ -13,7 +13,7 @@ A fully functional HTTP API with:
 - Argon2 password hashing
 - Axum extractor-based middleware for auth enforcement
 - In-memory SQLite database with seed data (no server setup required)
-- Unit tests for permissions, password hashing, JWT tokens, error mapping, DB schema, and models
+- Unit tests for permissions, password hashing, JWT tokens, error mapping, DB schema, and API response types
 
 ## Prerequisites
 
@@ -81,20 +81,27 @@ Tokens expire after 24 hours.
 
 ```
 src/
-├── main.rs              # Entry point, routing, app state
-├── db.rs                # SQLite setup, schema, seed data
-├── models.rs            # Structs for DB rows and HTTP payloads
-├── permissions.rs       # Role and Permission enums
-├── middleware.rs        # Auth and admin extractors
-├── error.rs             # Unified AppError type
+├── main.rs                        # Entry point, routing, app state
 ├── auth/
 │   ├── mod.rs
-│   ├── password.rs      # Argon2 hashing and verification
-│   └── token.rs         # JWT creation and validation
-└── handlers/
-    ├── mod.rs
-    ├── auth.rs          # Public auth endpoints
-    └── admin.rs         # Admin-only endpoints
+│   ├── password.rs                # Argon2 hashing and verification
+│   └── token.rs                   # JWT creation and validation
+├── database/
+│   ├── db.rs                      # SQLite setup, schema, seed data
+│   └── models/
+│       └── user.rs                # User row struct, Claims, request payload structs
+├── dto/
+│   └── responses/
+│       └── user-reponse.rs        # UserResponse — safe API shape (no password_hash)
+├── enums/
+│   └── permissions.rs             # Role and Permission enums
+├── handlers/
+│   ├── mod.rs
+│   ├── auth.rs                    # Public auth endpoints
+│   └── admin.rs                   # Admin-only endpoints
+└── utils/
+    ├── error.rs                   # Unified AppError type
+    └── middleware.rs              # Auth and admin extractors
 ```
 
 ## Guide
